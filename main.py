@@ -10,7 +10,7 @@ from collections import Counter
 # ============================================================
 st.set_page_config(page_title="Dashboard Bibliométrico Scopus", layout="wide", page_icon="📊")
 
-st.title("📊 Dashboard de Análise Bibliométrica (Scopus)")
+st.title(" Dashboard de Análise Bibliométrica (Scopus)")
 st.markdown("Análise interativa de publicações, citações e autores baseada em dados exportados do Scopus.")
 
 # ============================================================
@@ -181,7 +181,7 @@ with col_esq2:
 
 # 5. Top 10 Periódicos
 with col_dir2:
-    st.subheader("📚 Top 10 Periódicos")
+    st.subheader(" Top 10 Periódicos")
     top_periodicos = df_filtered['Source title'].value_counts().head(10).reset_index()
     top_periodicos.columns = ['Periódico', 'Publicações']
     fig_periodicos = px.bar(top_periodicos, x='Publicações', y='Periódico', orientation='h',
