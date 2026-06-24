@@ -46,7 +46,7 @@ df = df.dropna(subset=['Year'])
 
 # Normaliza a coluna Open Access
 df['OA_Status'] = df['Open Access'].apply(
-    lambda x: 'Open Access' if pd.notna(x) and 'Open Access' in str(x) else 'Fechado'
+    lambda x: 'Open Access' if pd.notna(x) and str(x).strip() != '' else 'Fechado'
 )
 
 # ============================================================
@@ -77,7 +77,7 @@ col4.metric("Artigos Open Access", df_filtered[df_filtered['OA_Status'] == 'Open
 st.markdown("---")
 
 # ============================================================
-# GRÁFICO COMBINADO: PUBLICAÇÕES vs CITAÇÕES (DESTAQUE)
+# GRÁFICO COMBINADO: PUBLICAÇÕES vs CITAÇÕES
 # ============================================================
 st.subheader("📈 Produtividade vs. Impacto (Publicações e Citações por Ano)")
 
@@ -117,9 +117,9 @@ fig_combo.add_trace(
 
 fig_combo.update_xaxes(title_text="Ano de Publicação", dtick=1)
 fig_combo.update_yaxes(title_text="<b>Quantidade</b> de Publicações", secondary_y=False,
-                       titlefont=dict(color="#1f77b4"))
+                       title_font=dict(color="#1f77b4"))
 fig_combo.update_yaxes(title_text="<b>Total</b> de Citações", secondary_y=True,
-                       titlefont=dict(color="#ff7f0e"))
+                       title_font=dict(color="#ff7f0e"))
 fig_combo.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     hovermode="x unified",
