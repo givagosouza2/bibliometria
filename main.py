@@ -8,9 +8,9 @@ from collections import Counter
 # ============================================================
 # CONFIGURAÇÃO DA PÁGINA
 # ============================================================
-st.set_page_config(page_title="Dashboard Bibliométrico Scopus", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Dashboard Bibliométrico Scopus", layout="wide", page_icon="")
 
-st.title(" Dashboard de Análise Bibliométrica (Scopus)")
+st.title("📊 Dashboard de Análise Bibliométrica (Scopus)")
 st.markdown("Análise interativa de publicações, citações e autores baseada em dados exportados do Scopus.")
 
 # ============================================================
@@ -43,6 +43,9 @@ if not file_loaded:
 df['Year'] = pd.to_numeric(df['Year'], errors='coerce')
 df['Cited by'] = pd.to_numeric(df['Cited by'], errors='coerce').fillna(0).astype(int)
 df = df.dropna(subset=['Year'])
+
+# Remove duplicatas
+df = df.drop_duplicates(subset=['Title', 'Year', 'Cited by'], keep='first')
 
 # Normaliza a coluna Open Access
 df['OA_Status'] = df['Open Access'].apply(
@@ -77,24 +80,25 @@ col4.metric("Artigos Open Access", df_filtered[df_filtered['OA_Status'] == 'Open
 st.markdown("---")
 
 # ============================================================
-# GRÁFICO COMBINADO: PUBLICAÇÕES vs CITAÇÕES
+# GRÁFICO 1: PUBLICAÇÕES vs CITAÇÕES POR ANO DE PUBLICAÇÃO
 # ============================================================
-st.subheader("📈 Produtividade vs. Impacto (Publicações e Citações por Ano)")
+st.subheader("📈 Gráfico 1: Publicações e Citações por Ano de Publicação")
+st.caption("Mostra o número de artigos publicados e o total de citações acumuladas dos artigos publicados em cada ano")
 
-df_ano_agg = df_filtered.groupby('Year').agg(
+df_ano = df_filtered.groupby('Year').agg(
     Publicacoes=('Title', 'count'),
     Total_Citacoes=('Cited by', 'sum'),
     Media_Citacoes=('Cited by', 'mean')
 ).reset_index()
 
-fig_combo = make_subplots(specs=[[{"secondary_y": True}]])
+fig1 = make_subplots(specs=[[{"secondary_y": True}]])
 
 # Barras = Publicações
-fig_combo.add_trace(
+fig1.add_trace(
     go.Bar(
-        x=df_ano_agg['Year'],
-        y=df_ano_agg['Publicacoes'],
-        name="Número de Publicações",
+        x=df_ano['Year'],
+        y=df_ano['Publicacoes'],
+        name="Publicações",
         marker_color='#1f77b4',
         hovertemplate='Ano: %{x}<br>Publicações: %{y}<extra></extra>'
     ),
@@ -102,10 +106,10 @@ fig_combo.add_trace(
 )
 
 # Linha = Total de Citações
-fig_combo.add_trace(
+fig1.add_trace(
     go.Scatter(
-        x=df_ano_agg['Year'],
-        y=df_ano_agg['Total_Citacoes'],
+        x=df_ano['Year'],
+        y=df_ano['Total_Citacoes'],
         name="Total de Citações",
         line=dict(color='#ff7f0e', width=4),
         mode='lines+markers',
@@ -115,17 +119,69 @@ fig_combo.add_trace(
     secondary_y=True,
 )
 
-fig_combo.update_xaxes(title_text="Ano de Publicação", dtick=1)
-fig_combo.update_yaxes(title_text="<b>Quantidade</b> de Publicações", secondary_y=False,
-                       title_font=dict(color="#1f77b4"))
-fig_combo.update_yaxes(title_text="<b>Total</b> de Citações", secondary_y=True,
-                       title_font=dict(color="#ff7f0e"))
-fig_combo.update_layout(
+fig1.update_xaxes(title_text="Ano de Publicação", dtick=1)
+fig1.update_yaxes(title_text="Número de Publicações", secondary_y=False,
+                  title_font=dict(color="#1f77b4"))
+fig1.update_yaxes(title_text="Total de Citações (acumulado até exportação)", secondary_y=True,
+                  title_font=dict(color="#ff7f0e"))
+fig1.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     hovermode="x unified",
     height=500
 )
-st.plotly_chart(fig_combo, use_container_width=True)
+st.plotly_chart(fig1, use_container_width=True)
+
+st.markdown("---")
+
+# ============================================================
+# GRÁFICO 2: PUBLICAÇÕES E CITAÇÕES CUMULATIVAS
+# ============================================================
+st.subheader("📈 Gráfico 2: Evolução Cumulativa de Publicações e Citações")
+st.caption("Mostra o crescimento acumulado de publicações e citações ao longo do tempo")
+
+# Calcula valores cumulativos
+df_ano['Publicacoes_Cumulativas'] = df_ano['Publicacoes'].cumsum()
+df_ano['Citacoes_Cumulativas'] = df_ano['Total_Citacoes'].cumsum()
+
+fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+
+# Barras = Publicações Cumulativas
+fig2.add_trace(
+    go.Bar(
+        x=df_ano['Year'],
+        y=df_ano['Publicacoes_Cumulativas'],
+        name="Publicações Cumulativas",
+        marker_color='#2ca02c',
+        hovertemplate='Ano: %{x}<br>Publicações Cumulativas: %{y}<extra></extra>'
+    ),
+    secondary_y=False,
+)
+
+# Linha = Citações Cumulativas
+fig2.add_trace(
+    go.Scatter(
+        x=df_ano['Year'],
+        y=df_ano['Citacoes_Cumulativas'],
+        name="Citações Cumulativas",
+        line=dict(color='#d62728', width=4),
+        mode='lines+markers',
+        marker=dict(size=8),
+        hovertemplate='Ano: %{x}<br>Citações Cumulativas: %{y}<extra></extra>'
+    ),
+    secondary_y=True,
+)
+
+fig2.update_xaxes(title_text="Ano de Publicação", dtick=1)
+fig2.update_yaxes(title_text="Publicações Cumulativas", secondary_y=False,
+                  title_font=dict(color="#2ca02c"))
+fig2.update_yaxes(title_text="Citações Cumulativas", secondary_y=True,
+                  title_font=dict(color="#d62728"))
+fig2.update_layout(
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    hovermode="x unified",
+    height=500
+)
+st.plotly_chart(fig2, use_container_width=True)
 
 st.markdown("---")
 
@@ -181,7 +237,7 @@ with col_esq2:
 
 # 5. Top 10 Periódicos
 with col_dir2:
-    st.subheader(" Top 10 Periódicos")
+    st.subheader("📚 Top 10 Periódicos")
     top_periodicos = df_filtered['Source title'].value_counts().head(10).reset_index()
     top_periodicos.columns = ['Periódico', 'Publicações']
     fig_periodicos = px.bar(top_periodicos, x='Publicações', y='Periódico', orientation='h',
