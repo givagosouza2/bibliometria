@@ -1,250 +1,362 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from collections import Counter
+import re
 
-# Configurar estilo dos gráficos
-sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (12, 6)
-plt.rcParams['font.size'] = 12
+# ============================================================
+# CONFIGURAÇÃO DA PÁGINA
+# ============================================================
+st.set_page_config(page_title="Dashboard Cientométrico", layout="wide", page_icon="📊")
 
-def load_data(gsouza_path: str, scopus_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Carrega os arquivos de dados do Google Scholar e Scopus.
-    
-    Args:
-        gsouza_path: Caminho para o arquivo CSV do Google Scholar
-        scopus_path: Caminho para o arquivo CSV do Scopus
-    
-    Returns:
-        Tuple com dois DataFrames (gsouza_df, scopus_df)
-    """
-    # Verificar se os arquivos existem
-    if not Path(gsouza_path).exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {gsouza_path}")
-    if not Path(scopus_path).exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {scopus_path}")
-    
-    # Carregar dados
-    gsouza_df = pd.read_csv(gsouza_path, encoding='utf-8')
-    scopus_df = pd.read_csv(scopus_path, encoding='utf-8')
-    
-    print(f"✓ Arquivo Google Scholar carregado: {gsouza_df.shape[0]} linhas")
-    print(f"✓ Arquivo Scopus carregado: {scopus_df.shape[0]} linhas")
-    
-    return gsouza_df, scopus_df
+st.title("📊 Dashboard de Análise Cientométrica")
+st.markdown("Análise combinada de dados **Scopus** (publicações) e **Google Scholar** (citações por ano).")
 
-def analyze_citations(gsouza_df: pd.DataFrame) -> dict:
-    """
-    Analisa os dados de citações do arquivo Google Scholar.
-    """
-    # Extrair métricas principais
-    total_citations = gsouza_df['Citações'].sum()
-    
-    # Calcular h-index
-    sorted_citations = sorted(gsouza_df['Citações'], reverse=True)
-    h_index = 0
-    for i, citations in enumerate(sorted_citations, 1):
-        if citations >= i:
-            h_index = i
-        else:
-            break
-    
-    # Publicações por ano
-    publications_by_year = gsouza_df.groupby('Ano').size()
-    
-    # Citações por ano
-    citations_by_year = gsouza_df.groupby('Ano')['Citações'].sum()
-    
-    # Top 10 artigos mais citados
-    top_cited = gsouza_df.nlargest(10, 'Citações')[['Título', 'Ano', 'Citações']]
-    
-    return {
-        'total_citations': total_citations,
-        'h_index': h_index,
-        'total_publications': len(gsouza_df),
-        'publications_by_year': publications_by_year,
-        'citations_by_year': citations_by_year,
-        'top_cited': top_cited
-    }
+# ============================================================
+# UPLOAD DE ARQUIVOS
+# ============================================================
+st.sidebar.header("📁 Upload de Arquivos")
 
-def analyze_publications(scopus_df: pd.DataFrame) -> dict:
-    """
-    Analisa os dados de publicações do arquivo Scopus.
-    """
-    # Total de publicações
-    total_pubs = len(scopus_df)
-    
-    # Publicações por ano
-    pubs_by_year = scopus_df['Year'].value_counts().sort_index()
-    
-    # Tipos de documento
-    doc_types = scopus_df['Document Type'].value_counts()
-    
-    # Periódicos mais frequentes
-    top_journals = scopus_df['Source title'].value_counts().head(10)
-    
-    # Autores mais frequentes
-    all_authors = []
-    for authors in scopus_df['Authors'].dropna():
-        all_authors.extend([a.strip() for a in authors.split(';')])
-    author_counts = pd.Series(all_authors).value_counts().head(10)
-    
-    return {
-        'total_publications': total_pubs,
-        'publications_by_year': pubs_by_year,
-        'document_types': doc_types,
-        'top_journals': top_journals,
-        'top_authors': author_counts
-    }
+scopus_file = st.sidebar.file_uploader("📄 Arquivo Scopus (CSV)", type=["csv"], key="scopus")
+gsouza_file = st.sidebar.file_uploader("📄 Arquivo Citações / Scholar (CSV)", type=["csv"], key="gsouza")
 
-def create_visualizations(citation_data: dict, publication_data: dict):
-    """
-    Cria visualizações da análise cientométrica.
-    """
-    fig = plt.figure(figsize=(20, 16))
-    
-    # 1. Evolução de publicações e citações ao longo do tempo
-    ax1 = plt.subplot(3, 2, 1)
-    years = sorted(set(citation_data['publications_by_year'].index) | 
-                   set(publication_data['publications_by_year'].index))
-    
-    pubs_scopus = [publication_data['publications_by_year'].get(y, 0) for y in years]
-    pubs_gs = [citation_data['publications_by_year'].get(y, 0) for y in years]
-    cits_gs = [citation_data['citations_by_year'].get(y, 0) for y in years]
-    
-    x = np.arange(len(years))
-    width = 0.35
-    
-    bars1 = ax1.bar(x - width/2, pubs_scopus, width, label='Scopus', alpha=0.7)
-    bars2 = ax1.bar(x + width/2, pubs_gs, width, label='Google Scholar', alpha=0.7)
-    
-    ax1.set_xlabel('Ano')
-    ax1.set_ylabel('Número de Publicações')
-    ax1.set_title('Publicações por Ano (Scopus vs Google Scholar)')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(years, rotation=45)
-    ax1.legend()
-    
-    # 2. Citações por ano
-    ax2 = plt.subplot(3, 2, 2)
-    ax2.plot(years, cits_gs, marker='o', linewidth=2, markersize=8)
-    ax2.fill_between(years, cits_gs, alpha=0.3)
-    ax2.set_xlabel('Ano')
-    ax2.set_ylabel('Número de Citações')
-    ax2.set_title('Evolução de Citações ao Longo do Tempo')
-    ax2.set_xticks(years[::2])
-    ax2.grid(True, alpha=0.3)
-    
-    # 3. Tipos de documento
-    ax3 = plt.subplot(3, 2, 3)
-    publication_data['document_types'].head(8).plot(kind='barh', ax=ax3, color='steelblue')
-    ax3.set_xlabel('Número de Publicações')
-    ax3.set_title('Tipos de Documento (Scopus)')
-    ax3.invert_yaxis()
-    
-    # 4. Top 10 periódicos
-    ax4 = plt.subplot(3, 2, 4)
-    publication_data['top_journals'].plot(kind='barh', ax=ax4, color='coral')
-    ax4.set_xlabel('Número de Publicações')
-    ax4.set_title('Top 10 Periódicos (Scopus)')
-    ax4.invert_yaxis()
-    
-    # 5. Top 10 autores
-    ax5 = plt.subplot(3, 2, 5)
-    publication_data['top_authors'].plot(kind='barh', ax=ax5, color='green')
-    ax5.set_xlabel('Número de Publicações')
-    ax5.set_title('Top 10 Autores (Scopus)')
-    ax5.invert_yaxis()
-    
-    # 6. Top 10 artigos mais citados
-    ax6 = plt.subplot(3, 2, 6)
-    top_cited = citation_data['top_cited']
-    colors = plt.cm.YlOrRd(np.linspace(0.3, 0.9, len(top_cited)))
-    ax6.barh(range(len(top_cited)), top_cited['Citações'], color=colors)
-    ax6.set_yticks(range(len(top_cited)))
-    ax6.set_yticklabels([f"{row['Título'][:50]}..." if len(str(row['Título'])) > 50 
-                         else row['Título'] for _, row in top_cited.iterrows()])
-    ax6.set_xlabel('Número de Citações')
-    ax6.set_title('Top 10 Artigos Mais Citados (Google Scholar)')
-    ax6.invert_yaxis()
-    
-    plt.tight_layout()
-    plt.savefig('analise_cientometrica.png', dpi=300, bbox_inches='tight')
-    print("✓ Gráfico salvo como 'analise_cientometrica.png'")
-    plt.show()
+if not scopus_file or not gsouza_file:
+    st.info("⬅️ Faça o upload dos dois arquivos CSV na barra lateral para iniciar a análise.")
+    st.stop()
 
-def generate_report(citation_data: dict, publication_data: dict):
-    """
-    Gera um relatório textual da análise cientométrica.
-    """
-    print("\n" + "="*70)
-    print("RELATÓRIO DE ANÁLISE CIENTOMÉTRICA")
-    print("="*70)
-    
-    print("\n📊 MÉTRICAS DO GOOGLE SCHOLAR:")
-    print(f"   • Total de publicações: {citation_data['total_publications']}")
-    print(f"   • Total de citações: {citation_data['total_citations']:,}")
-    print(f"   • Índice h: {citation_data['h_index']}")
-    print(f"   • Média de citações por artigo: {citation_data['total_citations']/citation_data['total_publications']:.1f}")
-    
-    print("\n📚 MÉTRICAS DO SCOPUS:")
-    print(f"   • Total de publicações: {publication_data['total_publications']}")
-    print(f"   • Período analisado: {publication_data['publications_by_year'].index.min()} - {publication_data['publications_by_year'].index.max()}")
-    
-    print("\n📈 PUBLICAÇÕES POR ANO (Scopus):")
-    for year, count in publication_data['publications_by_year'].items():
-        print(f"   {year}: {count}")
-    
-    print("\n🏆 TOP 5 PERIÓDICOS:")
-    for i, (journal, count) in enumerate(publication_data['top_journals'].head(5).items(), 1):
-        print(f"   {i}. {journal}: {count} publicações")
-    
-    print("\n👥 TOP 5 AUTORES:")
-    for i, (author, count) in enumerate(publication_data['top_authors'].head(5).items(), 1):
-        print(f"   {i}. {author}: {count} publicações")
-    
-    print("\n📖 TOP 5 ARTIGOS MAIS CITADOS:")
-    for i, row in citation_data['top_cited'].head(5).iterrows():
-        title = str(row['Título'])[:60] + "..." if len(str(row['Título'])) > 60 else row['Título']
-        print(f"   {i}. [{row['Ano']}] {title}")
-        print(f"      Citações: {row['Citações']}")
-    
-    print("\n" + "="*70)
-
-def main():
-    """
-    Função principal para executar a análise cientométrica.
-    """
-    # Caminhos dos arquivos
-    GSOUZA_PATH = 'GSouza.csv'
-    SCOPUS_PATH = 'scopus.csv'
-    
+# ============================================================
+# CARREGAMENTO - SCOPUS
+# ============================================================
+@st.cache_data
+def load_scopus(file):
     try:
-        # Carregar dados
-        print("Carregando dados...")
-        gsouza_df, scopus_df = load_data(GSOUZA_PATH, SCOPUS_PATH)
-        
-        # Analisar dados
-        print("\nAnalisando dados de citações...")
-        citation_data = analyze_citations(gsouza_df)
-        
-        print("Analisando dados de publicações...")
-        publication_data = analyze_publications(scopus_df)
-        
-        # Gerar visualizações
-        print("\nGerando visualizações...")
-        create_visualizations(citation_data, publication_data)
-        
-        # Gerar relatório
-        generate_report(citation_data, publication_data)
-        
-        print("\n✓ Análise concluída com sucesso!")
-        
-    except Exception as e:
-        print(f"\n❌ Erro durante a análise: {e}")
-        raise
+        df = pd.read_csv(file, encoding='utf-8')
+    except UnicodeDecodeError:
+        file.seek(0)
+        df = pd.read_csv(file, encoding='latin-1')
+    return df
 
-if __name__ == '__main__':
-    main()
+scopus_df = load_scopus(scopus_file)
+
+# Limpeza básica do Scopus
+scopus_df['Year'] = pd.to_numeric(scopus_df['Year'], errors='coerce')
+scopus_df['Cited by'] = pd.to_numeric(scopus_df['Cited by'], errors='coerce').fillna(0).astype(int)
+scopus_df = scopus_df.dropna(subset=['Year'])
+scopus_df = scopus_df.drop_duplicates(subset=['Title', 'Year', 'Cited by'], keep='first')
+
+# ============================================================
+# CARREGAMENTO - GSOUSA (Citações por ano)
+# ============================================================
+@st.cache_data
+def load_gsouza(file):
+    """
+    Carrega o arquivo do tipo GSouza.csv (perfil de citações).
+    O formato tem colunas com anos (2001, 2002, ..., 2026, Subtotal, Total)
+    e cada linha representa um artigo com citações recebidas por ano.
+    """
+    try:
+        raw = pd.read_csv(file, encoding='utf-8', header=None)
+    except UnicodeDecodeError:
+        file.seek(0)
+        raw = pd.read_csv(file, encoding='latin-1', header=None)
+    return raw
+
+gsouza_raw = load_gsouza(gsouza_file)
+
+# --- Parsing inteligente do GSouza ---
+# 1. Extrair h-index da primeira linha
+h_index_text = str(gsouza_raw.iloc[0].values)
+h_index_match = re.search(r'h-index\s*=\s*(\d+)', h_index_text)
+h_index = int(h_index_match.group(1)) if h_index_match else None
+
+# Total de documentos no h-index
+total_docs_match = re.search(r'(\d+)\s*documents', h_index_text)
+total_docs_hindex = int(total_docs_match.group(1)) if total_docs_match else None
+
+# Autor
+author_match = re.search(r'Author:\s*([^"]+)', h_index_text)
+author_name = author_match.group(1).strip() if author_match else "Autor"
+
+# 2. Identificar a linha de cabeçalho (contém os anos)
+header_row = None
+for i, row in gsouza_raw.iterrows():
+    row_str = ' '.join([str(v) for v in row.values if pd.notna(v)])
+    if 'Subtotal' in row_str or 'Total' in row_str:
+        header_row = i
+        break
+
+# 3. Parsear as citações anuais
+citation_years = {}
+if header_row is not None:
+    headers = [str(v).strip() for v in gsouza_raw.iloc[header_row].values]
+
+    # Encontrar colunas que são anos (números entre 2000 e 2030)
+    year_cols = {}
+    for idx, h in enumerate(headers):
+        try:
+            y = int(float(h))
+            if 2000 <= y <= 2030:
+                year_cols[idx] = y
+        except (ValueError, TypeError):
+            pass
+
+    # Dados das citações começam após o header
+    data_start = header_row + 1
+    yearly_citations = {y: 0 for y in year_cols.values()}
+
+    for i in range(data_start, len(gsouza_raw)):
+        row = gsouza_raw.iloc[i]
+        for col_idx, year in year_cols.items():
+            val = row.iloc[col_idx] if col_idx < len(row) else 0
+            try:
+                yearly_citations[year] += int(float(val)) if pd.notna(val) and str(val).strip() != '' else 0
+            except (ValueError, TypeError):
+                pass
+
+    citation_years = yearly_citations
+
+# Fallback: se não conseguir parsear, cria vazio
+if not citation_years:
+    citation_years = {}
+
+# ============================================================
+# SIDEBAR - FILTROS
+# ============================================================
+st.sidebar.markdown("---")
+st.sidebar.header("🔍 Filtros")
+
+min_year = int(scopus_df['Year'].min())
+max_year = int(scopus_df['Year'].max())
+year_range = st.sidebar.slider("Intervalo de Anos:", min_year, max_year, (min_year, max_year))
+
+doc_types = scopus_df['Document Type'].unique()
+selected_docs = st.sidebar.multiselect("Tipos de Documento:", doc_types, default=doc_types)
+
+df_filtered = scopus_df[
+    (scopus_df['Year'] >= year_range[0]) &
+    (scopus_df['Year'] <= year_range[1]) &
+    (scopus_df['Document Type'].isin(selected_docs))
+]
+
+# ============================================================
+# KPIs
+# ============================================================
+st.subheader(f"📌 Resumo Geral — {author_name}")
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.metric("Publicações (Scopus)", len(df_filtered))
+col2.metric("Total de Citações (Scopus)", int(df_filtered['Cited by'].sum()))
+col3.metric("Média Citações/Artigo", round(df_filtered['Cited by'].mean(), 2))
+if h_index is not None:
+    col4.metric("Índice h (Scholar)", h_index)
+else:
+    col4.metric("Índice h (Scholar)", "N/D")
+if total_docs_hindex is not None:
+    col5.metric("Documentos (Scholar)", total_docs_hindex)
+else:
+    col5.metric("Documentos (Scholar)", "N/D")
+
+st.markdown("---")
+
+# ============================================================
+# GRÁFICO 1: PUBLICAÇÕES (Scopus) + CITAÇÕES ANUAIS (Scholar)
+# ============================================================
+st.subheader("📈 Publicações por Ano (Scopus) vs. Citações Recebidas por Ano (Scholar)")
+st.caption("Barras = número de artigos publicados no ano (Scopus) | Linha = citações recebidas naquele ano (Scholar)")
+
+# Publicações por ano (Scopus)
+pubs_by_year = df_filtered.groupby('Year').size().reset_index(name='Publicacoes')
+
+# Citações por ano (Scholar)
+cits_df = pd.DataFrame(list(citation_years.items()), columns=['Year', 'Citacoes_Anuais'])
+cits_df['Year'] = pd.to_numeric(cits_df['Year'], errors='coerce')
+cits_df = cits_df.dropna(subset=['Year'])
+
+# Merge
+merged = pd.merge(pubs_by_year, cits_df, on='Year', how='outer').fillna(0)
+merged = merged.sort_values('Year')
+merged['Publicacoes'] = merged['Publicacoes'].astype(int)
+merged['Citacoes_Anuais'] = merged['Citacoes_Anuais'].astype(int)
+
+fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+
+fig1.add_trace(
+    go.Bar(
+        x=merged['Year'],
+        y=merged['Publicacoes'],
+        name="Publicações (Scopus)",
+        marker_color='#1f77b4',
+        hovertemplate='Ano: %{x}<br>Publicações: %{y}<extra></extra>'
+    ),
+    secondary_y=False,
+)
+
+if len(cits_df) > 0:
+    fig1.add_trace(
+        go.Scatter(
+            x=merged['Year'],
+            y=merged['Citacoes_Anuais'],
+            name="Citações no Ano (Scholar)",
+            line=dict(color='#ff7f0e', width=3),
+            mode='lines+markers',
+            marker=dict(size=7),
+            hovertemplate='Ano: %{x}<br>Citações no ano: %{y}<extra></extra>'
+        ),
+        secondary_y=True,
+    )
+
+fig1.update_xaxes(title_text="Ano", dtick=1)
+fig1.update_yaxes(title_text="Publicações", secondary_y=False, title_font=dict(color="#1f77b4"))
+fig1.update_yaxes(title_text="Citações Recebidas no Ano", secondary_y=True, title_font=dict(color="#ff7f0e"))
+fig1.update_layout(
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    hovermode="x unified",
+    height=500
+)
+st.plotly_chart(fig1, use_container_width=True)
+
+st.markdown("---")
+
+# ============================================================
+# GRÁFICO 2: CUMULATIVO (Publicações + Citações)
+# ============================================================
+st.subheader("📈 Evolução Cumulativa de Publicações e Citações")
+st.caption("Crescimento acumulado ao longo do tempo")
+
+merged['Publicacoes_Cumulativas'] = merged['Publicacoes'].cumsum()
+merged['Citacoes_Cumulativas'] = merged['Citacoes_Anuais'].cumsum()
+
+fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+
+fig2.add_trace(
+    go.Bar(
+        x=merged['Year'],
+        y=merged['Publicacoes_Cumulativas'],
+        name="Publicações Cumulativas",
+        marker_color='#2ca02c',
+        hovertemplate='Ano: %{x}<br>Publicações Acumuladas: %{y}<extra></extra>'
+    ),
+    secondary_y=False,
+)
+
+fig2.add_trace(
+    go.Scatter(
+        x=merged['Year'],
+        y=merged['Citacoes_Cumulativas'],
+        name="Citações Cumulativas",
+        line=dict(color='#d62728', width=3),
+        mode='lines+markers',
+        marker=dict(size=7),
+        hovertemplate='Ano: %{x}<br>Citações Acumuladas: %{y}<extra></extra>'
+    ),
+    secondary_y=True,
+)
+
+fig2.update_xaxes(title_text="Ano", dtick=1)
+fig2.update_yaxes(title_text="Publicações Cumulativas", secondary_y=False, title_font=dict(color="#2ca02c"))
+fig2.update_yaxes(title_text="Citações Cumulativas", secondary_y=True, title_font=dict(color="#d62728"))
+fig2.update_layout(
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    hovermode="x unified",
+    height=500
+)
+st.plotly_chart(fig2, use_container_width=True)
+
+st.markdown("---")
+
+# ============================================================
+# GRÁFICO 3: TOP 10 ARTIGOS MAIS CITADOS (Scopus)
+# ============================================================
+st.subheader("🏆 Top 10 Artigos Mais Citados (Scopus)")
+top_citados = df_filtered.nlargest(10, 'Cited by')[['Title', 'Year', 'Cited by', 'Source title']].copy()
+top_citados['Titulo_Curto'] = top_citados['Title'].apply(
+    lambda x: str(x)[:70] + '...' if len(str(x)) > 70 else str(x)
+)
+fig3 = px.bar(top_citados, x='Cited by', y='Titulo_Curto', orientation='h',
+              color='Cited by', color_continuous_scale='Viridis',
+              labels={'Titulo_Curto': 'Artigo', 'Cited by': 'Citações'},
+              hover_data=['Year', 'Source title', 'Title'])
+fig3.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
+st.plotly_chart(fig3, use_container_width=True)
+
+st.markdown("---")
+
+# ============================================================
+# GRÁFICOS SECUNDÁRIOS
+# ============================================================
+col_esq, col_dir = st.columns(2)
+
+with col_esq:
+    st.subheader("📄 Tipos de Documento")
+    tipos_doc = df_filtered['Document Type'].value_counts()
+    fig_tipo = px.pie(values=tipos_doc.values, names=tipos_doc.index, hole=0.4)
+    fig_tipo.update_traces(textposition='inside', textinfo='percent+label')
+    st.plotly_chart(fig_tipo, use_container_width=True)
+
+with col_dir:
+    st.subheader("📚 Top 10 Periódicos")
+    top_journals = df_filtered['Source title'].value_counts().head(10).reset_index()
+    top_journals.columns = ['Periódico', 'Publicações']
+    fig_journals = px.bar(top_journals, x='Publicações', y='Periódico', orientation='h',
+                          color='Publicações', color_continuous_scale='Magma')
+    fig_journals.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
+    st.plotly_chart(fig_journals, use_container_width=True)
+
+# ============================================================
+# TOP AUTORES (Coautores)
+# ============================================================
+st.subheader("👥 Top 10 Coautores mais Frequentes")
+lista_autores = []
+for autores in df_filtered['Authors'].dropna():
+    lista_autores.extend([a.strip() for a in str(autores).split(';')])
+
+# Filtrar o próprio autor para mostrar coautores
+contagem_autores = Counter(lista_autores).most_common(15)
+df_autores = pd.DataFrame(contagem_autores, columns=['Autor', 'Publicações'])
+
+# Tenta remover o autor principal da lista
+if author_name:
+    # Busca parcial para remover variações do nome
+    mask = df_autores['Autor'].apply(lambda x: author_name.split(',')[0].strip() not in str(x))
+    df_coautores = df_autores[mask].head(10)
+else:
+    df_coautores = df_autores.head(10)
+
+fig_autores = px.bar(df_coautores, x='Publicações', y='Autor', orientation='h',
+                     color='Publicações', color_continuous_scale='Plasma')
+fig_autores.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
+st.plotly_chart(fig_autores, use_container_width=True)
+
+st.markdown("---")
+
+# ============================================================
+# TABELA: CITAÇÕES ANUAIS (Scholar)
+# ============================================================
+if len(cits_df) > 0:
+    st.subheader("📋 Tabela de Citações por Ano (Scholar)")
+    st.dataframe(
+        cits_df.sort_values('Year').rename(columns={
+            'Year': 'Ano',
+            'Citacoes_Anuais': 'Citações Recebidas no Ano'
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# ============================================================
+# TABELA: DADOS FILTRADOS (Scopus)
+# ============================================================
+st.markdown("---")
+st.subheader("📋 Publicações Filtradas (Scopus)")
+st.dataframe(
+    df_filtered[['Title', 'Authors', 'Year', 'Source title', 'Cited by', 'Document Type']],
+    use_container_width=True
+)
+
+# ============================================================
+# RODAPÉ
+# ============================================================
+st.markdown("---")
+st.caption("Dashboard Cientométrico | Dados: Scopus + Google Scholar | Streamlit + Plotly")
