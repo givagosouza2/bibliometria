@@ -1,262 +1,662 @@
-import streamlit as st
+import io
+import re
+import math
+import unicodedata
+from collections import Counter
+from itertools import combinations
+
+import numpy as np
 import pandas as pd
+import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from collections import Counter
+import networkx as nx
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
-# ============================================================
-# CONFIGURAÇÃO DA PÁGINA
-# ============================================================
-st.set_page_config(page_title="Dashboard Bibliométrico Scopus", layout="wide", page_icon="")
 
-st.title("📊 Dashboard de Análise Bibliométrica (Scopus)")
-st.markdown("Análise interativa de publicações, citações e autores baseada em dados exportados do Scopus.")
+st.set_page_config(
+    page_title="Análise Cientométrica — Scopus",
+    page_icon="📚",
+    layout="wide",
+)
 
-# ============================================================
-# CARREGAMENTO DE DADOS
-# ============================================================
-@st.cache_data
-def load_data(file_path):
+REQUIRED_COLUMNS = {
+    "Authors", "Title", "Year", "Source title", "Cited by",
+    "Document Type", "Affiliations", "Author Keywords",
+    "Index Keywords", "Abstract", "References"
+}
+
+
+def normalize_text(value):
+    if pd.isna(value):
+        return ""
+    value = str(value).strip()
+    value = unicodedata.normalize("NFKC", value)
+    return re.sub(r"\s+", " ", value)
+
+
+def split_semicolon(value):
+    text = normalize_text(value)
+    if not text:
+        return []
+    return [item.strip() for item in text.split(";") if item.strip()]
+
+
+def clean_author_name(name):
+    name = re.sub(r"\s*\([^)]*\)\s*$", "", normalize_text(name))
+    return name.strip(" ;,")
+
+
+def parse_authors(row):
+    full = split_semicolon(row.get("Author full names", ""))
+    if full:
+        return [clean_author_name(x) for x in full]
+    return [clean_author_name(x) for x in split_semicolon(row.get("Authors", ""))]
+
+
+def parse_keywords(row):
+    values = split_semicolon(row.get("Author Keywords", ""))
+    if not values:
+        values = split_semicolon(row.get("Index Keywords", ""))
+    return [x.lower().strip() for x in values if x.strip()]
+
+
+def parse_affiliations(value):
+    return split_semicolon(value)
+
+
+def load_scopus(uploaded_file):
+    raw = uploaded_file.getvalue()
+    attempts = [
+        {"encoding": "utf-8-sig"},
+        {"encoding": "utf-8"},
+        {"encoding": "latin-1"},
+    ]
+    last_error = None
+    for kwargs in attempts:
+        try:
+            return pd.read_csv(io.BytesIO(raw), **kwargs)
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"Não foi possível ler o CSV: {last_error}")
+
+
+def prepare_data(df):
+    df = df.copy()
+    df.columns = [normalize_text(c) for c in df.columns]
+
+    missing = REQUIRED_COLUMNS.difference(df.columns)
+    if missing:
+        raise ValueError(
+            "O arquivo não contém todos os campos esperados da Scopus. "
+            f"Campos ausentes: {', '.join(sorted(missing))}"
+        )
+
+    df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+    df["Cited by"] = pd.to_numeric(df["Cited by"], errors="coerce").fillna(0)
+    df = df.dropna(subset=["Year", "Title"]).copy()
+    df["Year"] = df["Year"].astype(int)
+    df["Cited by"] = df["Cited by"].astype(float)
+
+    df["Authors_list"] = df.apply(parse_authors, axis=1)
+    df["Keywords_list"] = df.apply(parse_keywords, axis=1)
+    df["Affiliations_list"] = df["Affiliations"].apply(parse_affiliations)
+    df["N_authors"] = df["Authors_list"].apply(len)
+    df["N_keywords"] = df["Keywords_list"].apply(len)
+
+    current_year = pd.Timestamp.now().year
+    df["Publication_age"] = (current_year - df["Year"] + 1).clip(lower=1)
+    df["Citations_per_year"] = df["Cited by"] / df["Publication_age"]
+
+    text_cols = ["Title", "Abstract", "Author Keywords", "Index Keywords"]
+    for col in text_cols:
+        if col not in df:
+            df[col] = ""
+        df[col] = df[col].fillna("").astype(str)
+
+    df["Text_for_topics"] = (
+        df["Title"] + ". " + df["Abstract"] + ". " +
+        df["Author Keywords"] + "; " + df["Index Keywords"]
+    )
+
+    return df
+
+
+def h_index(citations):
+    values = sorted([float(x) for x in citations if pd.notna(x)], reverse=True)
+    return sum(c >= i for i, c in enumerate(values, start=1))
+
+
+def g_index(citations):
+    values = sorted([float(x) for x in citations if pd.notna(x)], reverse=True)
+    cumulative = 0
+    g = 0
+    for i, value in enumerate(values, start=1):
+        cumulative += value
+        if cumulative >= i * i:
+            g = i
+    return g
+
+
+def m_index(citations, first_year):
+    h = h_index(citations)
+    career_years = max(pd.Timestamp.now().year - int(first_year) + 1, 1)
+    return h / career_years
+
+
+def dataframe_to_csv(df):
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def plot_network(edges, node_weights, title, max_nodes=40):
+    if not edges:
+        st.info("Não há conexões suficientes com os filtros atuais.")
+        return
+
+    strongest = Counter()
+    for a, b, w in edges:
+        strongest[a] += w
+        strongest[b] += w
+
+    selected = {n for n, _ in strongest.most_common(max_nodes)}
+    graph = nx.Graph()
+    for a, b, weight in edges:
+        if a in selected and b in selected:
+            graph.add_edge(a, b, weight=weight)
+
+    if graph.number_of_nodes() < 2:
+        st.info("A rede ficou pequena demais após a filtragem.")
+        return
+
+    pos = nx.spring_layout(graph, seed=42, weight="weight", k=1.2 / math.sqrt(graph.number_of_nodes()))
+
+    edge_x, edge_y = [], []
+    for a, b in graph.edges():
+        x0, y0 = pos[a]
+        x1, y1 = pos[b]
+        edge_x += [x0, x1, None]
+        edge_y += [y0, y1, None]
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y, mode="lines",
+        line=dict(width=0.7, color="rgba(130,130,130,0.45)"),
+        hoverinfo="none"
+    )
+
+    node_x, node_y, labels, sizes, hover = [], [], [], [], []
+    degrees = dict(graph.degree(weight="weight"))
+    for node in graph.nodes():
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        labels.append(node)
+        sizes.append(10 + 3.2 * math.sqrt(max(node_weights.get(node, 1), 1)))
+        hover.append(
+            f"<b>{node}</b><br>Documentos: {node_weights.get(node, 0)}"
+            f"<br>Força das conexões: {degrees.get(node, 0):.0f}"
+        )
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y, mode="markers+text",
+        text=labels, textposition="top center",
+        hovertext=hover, hoverinfo="text",
+        marker=dict(
+            size=sizes,
+            color=[degrees.get(n, 0) for n in graph.nodes()],
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title="Força"),
+            line=dict(width=0.5, color="white")
+        )
+    )
+
+    fig = go.Figure([edge_trace, node_trace])
+    fig.update_layout(
+        title=title,
+        showlegend=False,
+        hovermode="closest",
+        margin=dict(l=10, r=10, t=55, b=10),
+        height=690,
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def author_network(df):
+    edge_counter = Counter()
+    node_counter = Counter()
+    for authors in df["Authors_list"]:
+        unique = list(dict.fromkeys(authors))
+        node_counter.update(unique)
+        for a, b in combinations(sorted(unique), 2):
+            edge_counter[(a, b)] += 1
+    edges = [(a, b, w) for (a, b), w in edge_counter.items()]
+    return edges, node_counter
+
+
+def keyword_network(df, min_occurrence=2):
+    node_counter = Counter()
+    edge_counter = Counter()
+    for keywords in df["Keywords_list"]:
+        unique = list(dict.fromkeys(keywords))
+        node_counter.update(unique)
+
+    allowed = {k for k, n in node_counter.items() if n >= min_occurrence}
+    for keywords in df["Keywords_list"]:
+        unique = sorted(set(keywords).intersection(allowed))
+        for a, b in combinations(unique, 2):
+            edge_counter[(a, b)] += 1
+
+    edges = [(a, b, w) for (a, b), w in edge_counter.items()]
+    filtered_nodes = Counter({k: v for k, v in node_counter.items() if k in allowed})
+    return edges, filtered_nodes
+
+
+def thematic_clusters(df, n_clusters):
+    docs = df[df["Text_for_topics"].str.len() > 40].copy()
+    if len(docs) < max(8, n_clusters * 2):
+        return None, None, "Há poucos documentos com texto suficiente para a análise temática."
+
+    max_df = 0.90 if len(docs) >= 20 else 1.0
+    vectorizer = TfidfVectorizer(
+        stop_words="english",
+        min_df=2 if len(docs) >= 20 else 1,
+        max_df=max_df,
+        ngram_range=(1, 2),
+        max_features=2500,
+        strip_accents="unicode"
+    )
     try:
-        return pd.read_csv(file_path, encoding='utf-8')
-    except UnicodeDecodeError:
-        return pd.read_csv(file_path, encoding='latin-1')
+        matrix = vectorizer.fit_transform(docs["Text_for_topics"])
+    except ValueError as exc:
+        return None, None, str(exc)
+
+    n_clusters = min(n_clusters, matrix.shape[0] - 1)
+    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
+    labels = model.fit_predict(matrix)
+    docs["Cluster"] = labels + 1
+
+    terms = np.array(vectorizer.get_feature_names_out())
+    cluster_terms = []
+    for idx, center in enumerate(model.cluster_centers_):
+        top = terms[center.argsort()[::-1][:10]]
+        cluster_terms.append({
+            "Cluster": idx + 1,
+            "Termos característicos": "; ".join(top),
+            "Documentos": int((labels == idx).sum()),
+            "Citações": int(docs.loc[labels == idx, "Cited by"].sum())
+        })
+
+    if matrix.shape[1] >= 2:
+        coords = PCA(n_components=2, random_state=42).fit_transform(matrix.toarray())
+        docs["Dimensão 1"] = coords[:, 0]
+        docs["Dimensão 2"] = coords[:, 1]
+    else:
+        docs["Dimensão 1"] = np.arange(len(docs))
+        docs["Dimensão 2"] = 0
+
+    return docs, pd.DataFrame(cluster_terms), None
+
+
+st.title("📚 Análise Cientométrica de Exportações da Scopus")
+st.caption(
+    "Aplicativo para indicadores bibliométricos, produtividade, impacto, "
+    "redes de colaboração e estrutura temática."
+)
+
+with st.sidebar:
+    st.header("1. Arquivo")
+    uploaded = st.file_uploader("Carregue o CSV exportado da Scopus", type=["csv"])
+    st.markdown(
+        "Na Scopus, prefira **Export → CSV → All available information**."
+    )
+
+if uploaded is None:
+    st.info("Carregue um arquivo CSV da Scopus para iniciar.")
+    st.stop()
 
 try:
-    df = load_data('AHerculano.csv')
-    file_loaded = True
-except FileNotFoundError:
-    file_loaded = False
+    raw_df = load_scopus(uploaded)
+    data = prepare_data(raw_df)
+except Exception as exc:
+    st.error(str(exc))
+    st.stop()
 
-if not file_loaded:
-    st.warning("Arquivo 'AHerculano.csv' não encontrado. Faça o upload:")
-    uploaded_file = st.file_uploader("Escolha o arquivo CSV do Scopus", type="csv")
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file, encoding='utf-8')
+with st.sidebar:
+    st.header("2. Filtros")
+    min_year, max_year = int(data["Year"].min()), int(data["Year"].max())
+    year_range = st.slider(
+        "Período de publicação",
+        min_value=min_year,
+        max_value=max_year,
+        value=(min_year, max_year)
+    )
+
+    document_types = sorted(data["Document Type"].dropna().astype(str).unique())
+    selected_types = st.multiselect(
+        "Tipos de documento",
+        document_types,
+        default=document_types
+    )
+
+    sources = sorted(data["Source title"].dropna().astype(str).unique())
+    selected_sources = st.multiselect(
+        "Periódicos/fontes",
+        sources,
+        default=[]
+    )
+
+filtered = data[
+    data["Year"].between(year_range[0], year_range[1]) &
+    data["Document Type"].astype(str).isin(selected_types)
+].copy()
+
+if selected_sources:
+    filtered = filtered[filtered["Source title"].astype(str).isin(selected_sources)]
+
+if filtered.empty:
+    st.warning("Nenhum documento corresponde aos filtros selecionados.")
+    st.stop()
+
+tabs = st.tabs([
+    "Visão geral", "Produção e impacto", "Periódicos e documentos",
+    "Coautoria", "Palavras-chave", "Instituições", "Temas", "Dados"
+])
+
+with tabs[0]:
+    citations = filtered["Cited by"]
+    first_year = int(filtered["Year"].min())
+    total_docs = len(filtered)
+    total_citations = int(citations.sum())
+    h = h_index(citations)
+    g = g_index(citations)
+    m = m_index(citations, first_year)
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Documentos", f"{total_docs}")
+    c2.metric("Citações", f"{total_citations:,}".replace(",", "."))
+    c3.metric("Citações/documento", f"{citations.mean():.2f}")
+    c4.metric("Índice h", f"{h}")
+    c5.metric("Índice g", f"{g}")
+    c6.metric("Índice m", f"{m:.2f}")
+
+    zero = int((citations == 0).sum())
+    international_proxy = int((filtered["Affiliations"].fillna("").str.count("Brazil") <
+                               filtered["Affiliations"].fillna("").str.count(";")).sum())
+
+    st.markdown(
+        f"**Período analisado:** {first_year}–{int(filtered['Year'].max())}  \n"
+        f"**Documentos sem citações:** {zero}  \n"
+        f"**Mediana de citações:** {citations.median():.1f}  \n"
+        f"**Média de autores por documento:** {filtered['N_authors'].mean():.2f}"
+    )
+
+    annual = filtered.groupby("Year").agg(
+        Documentos=("Title", "count"),
+        Citacoes_dos_documentos=("Cited by", "sum"),
+        Media_citacoes=("Cited by", "mean")
+    ).reset_index()
+
+    fig = px.bar(
+        annual, x="Year", y="Documentos",
+        title="Produção científica anual",
+        labels={"Year": "Ano", "Documentos": "Número de documentos"}
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.download_button(
+        "Baixar resumo anual",
+        dataframe_to_csv(annual),
+        "resumo_anual.csv",
+        "text/csv"
+    )
+
+with tabs[1]:
+    annual = filtered.groupby("Year").agg(
+        Documentos=("Title", "count"),
+        Citacoes=("Cited by", "sum"),
+        Citacoes_medias=("Cited by", "mean"),
+        Autores_medios=("N_authors", "mean")
+    ).reset_index()
+
+    fig1 = px.line(
+        annual, x="Year", y="Documentos", markers=True,
+        title="Evolução da produção",
+        labels={"Year": "Ano", "Documentos": "Documentos"}
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+    fig2 = px.line(
+        annual, x="Year", y="Citacoes", markers=True,
+        title="Citações acumuladas pelos documentos de cada ano de publicação",
+        labels={"Year": "Ano de publicação", "Citacoes": "Citações atuais"}
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+    fig3 = px.scatter(
+        filtered,
+        x="Year", y="Cited by",
+        size="Citations_per_year",
+        hover_name="Title",
+        hover_data=["Source title", "Document Type", "Citations_per_year"],
+        title="Impacto por documento",
+        labels={
+            "Year": "Ano",
+            "Cited by": "Citações",
+            "Citations_per_year": "Citações/ano"
+        }
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+
+    distribution = px.histogram(
+        filtered, x="Cited by", nbins=25,
+        title="Distribuição das citações",
+        labels={"Cited by": "Citações", "count": "Documentos"}
+    )
+    st.plotly_chart(distribution, use_container_width=True)
+
+    impact_table = filtered[[
+        "Title", "Year", "Source title", "Cited by",
+        "Citations_per_year", "DOI", "Document Type"
+    ]].sort_values(["Citations_per_year", "Cited by"], ascending=False)
+    st.subheader("Impacto normalizado pelo tempo")
+    st.dataframe(impact_table, use_container_width=True, hide_index=True)
+
+with tabs[2]:
+    source_table = filtered.groupby("Source title").agg(
+        Documentos=("Title", "count"),
+        Citacoes=("Cited by", "sum"),
+        Media_citacoes=("Cited by", "mean"),
+        Primeiro_ano=("Year", "min"),
+        Ultimo_ano=("Year", "max")
+    ).reset_index().sort_values(
+        ["Documentos", "Citacoes"], ascending=False
+    )
+
+    top_n = st.slider("Número de fontes no gráfico", 5, 30, 15)
+    fig = px.bar(
+        source_table.head(top_n).sort_values("Documentos"),
+        x="Documentos", y="Source title", orientation="h",
+        title="Periódicos e fontes mais produtivos",
+        labels={"Source title": "Fonte"}
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(source_table, use_container_width=True, hide_index=True)
+
+    st.subheader("Documentos mais citados")
+    top_docs = filtered[[
+        "Title", "Authors", "Year", "Source title", "Cited by",
+        "Citations_per_year", "DOI", "Document Type"
+    ]].sort_values("Cited by", ascending=False)
+    st.dataframe(top_docs.head(30), use_container_width=True, hide_index=True)
+    st.download_button(
+        "Baixar tabela de documentos",
+        dataframe_to_csv(top_docs),
+        "documentos_ordenados_por_citacoes.csv",
+        "text/csv"
+    )
+
+with tabs[3]:
+    edges, nodes = author_network(filtered)
+    author_table = pd.DataFrame(
+        nodes.most_common(),
+        columns=["Autor", "Documentos"]
+    )
+    st.subheader("Autores mais frequentes")
+    st.dataframe(author_table.head(50), use_container_width=True, hide_index=True)
+
+    max_nodes = st.slider("Autores exibidos na rede", 10, 80, 40)
+    plot_network(
+        edges, nodes,
+        "Rede de coautoria — tamanho do nó representa número de documentos",
+        max_nodes=max_nodes
+    )
+
+    edge_table = pd.DataFrame(edges, columns=["Autor 1", "Autor 2", "Colaborações"])
+    edge_table = edge_table.sort_values("Colaborações", ascending=False)
+    st.download_button(
+        "Baixar relações de coautoria",
+        dataframe_to_csv(edge_table),
+        "rede_coautoria.csv",
+        "text/csv"
+    )
+
+with tabs[4]:
+    keyword_counter = Counter()
+    for items in filtered["Keywords_list"]:
+        keyword_counter.update(set(items))
+
+    keyword_table = pd.DataFrame(
+        keyword_counter.most_common(),
+        columns=["Palavra-chave", "Documentos"]
+    )
+
+    st.subheader("Palavras-chave mais frequentes")
+    st.dataframe(keyword_table.head(60), use_container_width=True, hide_index=True)
+
+    min_occ = st.slider("Ocorrência mínima na rede", 1, 10, 2)
+    max_kw_nodes = st.slider("Palavras-chave exibidas", 10, 80, 40)
+    kw_edges, kw_nodes = keyword_network(filtered, min_occurrence=min_occ)
+    plot_network(
+        kw_edges, kw_nodes,
+        "Rede de coocorrência de palavras-chave",
+        max_nodes=max_kw_nodes
+    )
+
+    kw_edge_table = pd.DataFrame(
+        kw_edges, columns=["Palavra-chave 1", "Palavra-chave 2", "Coocorrências"]
+    ).sort_values("Coocorrências", ascending=False)
+    st.download_button(
+        "Baixar rede de palavras-chave",
+        dataframe_to_csv(kw_edge_table),
+        "rede_palavras_chave.csv",
+        "text/csv"
+    )
+
+with tabs[5]:
+    affiliation_counter = Counter()
+    affiliation_citations = Counter()
+    for _, row in filtered.iterrows():
+        affiliations = set(row["Affiliations_list"])
+        for affiliation in affiliations:
+            affiliation_counter[affiliation] += 1
+            affiliation_citations[affiliation] += row["Cited by"]
+
+    aff_table = pd.DataFrame([
+        {
+            "Afiliação": aff,
+            "Documentos": count,
+            "Citações associadas": int(affiliation_citations[aff])
+        }
+        for aff, count in affiliation_counter.items()
+    ]).sort_values(["Documentos", "Citações associadas"], ascending=False)
+
+    st.subheader("Afiliações presentes nos documentos")
+    st.caption(
+        "A exportação da Scopus pode reunir departamento, laboratório e universidade "
+        "como afiliações separadas; recomenda-se padronização manual para estudos formais."
+    )
+    st.dataframe(aff_table.head(100), use_container_width=True, hide_index=True)
+
+    fig = px.bar(
+        aff_table.head(20).sort_values("Documentos"),
+        x="Documentos", y="Afiliação", orientation="h",
+        title="Afiliações mais frequentes"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.download_button(
+        "Baixar afiliações",
+        dataframe_to_csv(aff_table),
+        "afiliacoes.csv",
+        "text/csv"
+    )
+
+with tabs[6]:
+    st.subheader("Agrupamento temático exploratório")
+    st.caption(
+        "O agrupamento usa TF–IDF e K-means sobre títulos, resumos e palavras-chave. "
+        "É uma análise exploratória; os rótulos precisam de interpretação científica."
+    )
+    max_clusters = min(10, max(2, len(filtered) // 4))
+    n_clusters = st.slider("Número de grupos temáticos", 2, max_clusters, min(5, max_clusters))
+
+    topic_docs, topic_summary, error = thematic_clusters(filtered, n_clusters)
+    if error:
+        st.warning(error)
     else:
-        st.stop()
+        st.dataframe(topic_summary, use_container_width=True, hide_index=True)
 
-# ============================================================
-# LIMPEZA E PRÉ-PROCESSAMENTO
-# ============================================================
-df['Year'] = pd.to_numeric(df['Year'], errors='coerce')
-df['Cited by'] = pd.to_numeric(df['Cited by'], errors='coerce').fillna(0).astype(int)
-df = df.dropna(subset=['Year'])
+        fig = px.scatter(
+            topic_docs,
+            x="Dimensão 1", y="Dimensão 2",
+            color=topic_docs["Cluster"].astype(str),
+            size="Cited by",
+            hover_name="Title",
+            hover_data=["Year", "Source title"],
+            title="Mapa bidimensional dos grupos temáticos",
+            labels={"color": "Grupo"}
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-# Remove duplicatas
-df = df.drop_duplicates(subset=['Title', 'Year', 'Cited by'], keep='first')
+        cluster_year = topic_docs.groupby(["Year", "Cluster"]).size().reset_index(name="Documentos")
+        cluster_year["Cluster"] = cluster_year["Cluster"].astype(str)
+        evolution = px.area(
+            cluster_year, x="Year", y="Documentos", color="Cluster",
+            title="Evolução temporal dos grupos temáticos"
+        )
+        st.plotly_chart(evolution, use_container_width=True)
 
-# Normaliza a coluna Open Access
-df['OA_Status'] = df['Open Access'].apply(
-    lambda x: 'Open Access' if pd.notna(x) and str(x).strip() != '' else 'Fechado'
+        export_topics = topic_docs[[
+            "Title", "Year", "Source title", "Cited by", "Cluster"
+        ]].sort_values(["Cluster", "Cited by"], ascending=[True, False])
+        st.download_button(
+            "Baixar classificação temática",
+            dataframe_to_csv(export_topics),
+            "classificacao_tematica.csv",
+            "text/csv"
+        )
+
+with tabs[7]:
+    st.subheader("Base filtrada")
+    display_cols = [
+        "Authors", "Title", "Year", "Source title", "Cited by", "DOI",
+        "Document Type", "Author Keywords", "Index Keywords", "Affiliations"
+    ]
+    st.dataframe(filtered[display_cols], use_container_width=True, hide_index=True)
+    st.download_button(
+        "Baixar base filtrada",
+        dataframe_to_csv(filtered.drop(columns=[
+            "Authors_list", "Keywords_list", "Affiliations_list"
+        ], errors="ignore")),
+        "base_scopus_filtrada.csv",
+        "text/csv"
+    )
+
+st.divider()
+st.caption(
+    "A contagem de citações corresponde ao valor registrado no momento da exportação "
+    "da Scopus. Redes institucionais e internacionais exigem padronização das afiliações."
 )
-
-# ============================================================
-# SIDEBAR - FILTROS
-# ============================================================
-st.sidebar.header("🔍 Filtros")
-
-min_year = int(df['Year'].min())
-max_year = int(df['Year'].max())
-year_range = st.sidebar.slider("Intervalo de Anos:", min_year, max_year, (min_year, max_year))
-
-doc_types = df['Document Type'].unique()
-selected_docs = st.sidebar.multiselect("Tipos de Documento:", doc_types, default=doc_types)
-
-df_filtered = df[(df['Year'] >= year_range[0]) & (df['Year'] <= year_range[1])]
-df_filtered = df_filtered[df_filtered['Document Type'].isin(selected_docs)]
-
-# ============================================================
-# KPIs - RESUMO GERAL
-# ============================================================
-st.subheader("📌 Resumo Geral")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total de Publicações", len(df_filtered))
-col2.metric("Total de Citações", int(df_filtered['Cited by'].sum()))
-col3.metric("Média de Citações/Artigo", round(df_filtered['Cited by'].mean(), 2))
-col4.metric("Artigos Open Access", df_filtered[df_filtered['OA_Status'] == 'Open Access'].shape[0])
-
-st.markdown("---")
-
-# ============================================================
-# GRÁFICO 1: PUBLICAÇÕES vs CITAÇÕES POR ANO DE PUBLICAÇÃO
-# ============================================================
-st.subheader("📈 Gráfico 1: Publicações e Citações por Ano de Publicação")
-st.caption("Mostra o número de artigos publicados e o total de citações acumuladas dos artigos publicados em cada ano")
-
-df_ano = df_filtered.groupby('Year').agg(
-    Publicacoes=('Title', 'count'),
-    Total_Citacoes=('Cited by', 'sum'),
-    Media_Citacoes=('Cited by', 'mean')
-).reset_index()
-
-fig1 = make_subplots(specs=[[{"secondary_y": True}]])
-
-# Barras = Publicações
-fig1.add_trace(
-    go.Bar(
-        x=df_ano['Year'],
-        y=df_ano['Publicacoes'],
-        name="Publicações",
-        marker_color='#1f77b4',
-        hovertemplate='Ano: %{x}<br>Publicações: %{y}<extra></extra>'
-    ),
-    secondary_y=False,
-)
-
-# Linha = Total de Citações
-fig1.add_trace(
-    go.Scatter(
-        x=df_ano['Year'],
-        y=df_ano['Total_Citacoes'],
-        name="Total de Citações",
-        line=dict(color='#ff7f0e', width=4),
-        mode='lines+markers',
-        marker=dict(size=8),
-        hovertemplate='Ano: %{x}<br>Total de Citações: %{y}<extra></extra>'
-    ),
-    secondary_y=True,
-)
-
-fig1.update_xaxes(title_text="Ano de Publicação", dtick=1)
-fig1.update_yaxes(title_text="Número de Publicações", secondary_y=False,
-                  title_font=dict(color="#1f77b4"))
-fig1.update_yaxes(title_text="Total de Citações (acumulado até exportação)", secondary_y=True,
-                  title_font=dict(color="#ff7f0e"))
-fig1.update_layout(
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    hovermode="x unified",
-    height=500
-)
-st.plotly_chart(fig1, use_container_width=True)
-
-st.markdown("---")
-
-# ============================================================
-# GRÁFICO 2: PUBLICAÇÕES E CITAÇÕES CUMULATIVAS
-# ============================================================
-st.subheader("📈 Gráfico 2: Evolução Cumulativa de Publicações e Citações")
-st.caption("Mostra o crescimento acumulado de publicações e citações ao longo do tempo")
-
-# Calcula valores cumulativos
-df_ano['Publicacoes_Cumulativas'] = df_ano['Publicacoes'].cumsum()
-df_ano['Citacoes_Cumulativas'] = df_ano['Total_Citacoes'].cumsum()
-
-fig2 = make_subplots(specs=[[{"secondary_y": True}]])
-
-# Barras = Publicações Cumulativas
-fig2.add_trace(
-    go.Bar(
-        x=df_ano['Year'],
-        y=df_ano['Publicacoes_Cumulativas'],
-        name="Publicações Cumulativas",
-        marker_color='#2ca02c',
-        hovertemplate='Ano: %{x}<br>Publicações Cumulativas: %{y}<extra></extra>'
-    ),
-    secondary_y=False,
-)
-
-# Linha = Citações Cumulativas
-fig2.add_trace(
-    go.Scatter(
-        x=df_ano['Year'],
-        y=df_ano['Citacoes_Cumulativas'],
-        name="Citações Cumulativas",
-        line=dict(color='#d62728', width=4),
-        mode='lines+markers',
-        marker=dict(size=8),
-        hovertemplate='Ano: %{x}<br>Citações Cumulativas: %{y}<extra></extra>'
-    ),
-    secondary_y=True,
-)
-
-fig2.update_xaxes(title_text="Ano de Publicação", dtick=1)
-fig2.update_yaxes(title_text="Publicações Cumulativas", secondary_y=False,
-                  title_font=dict(color="#2ca02c"))
-fig2.update_yaxes(title_text="Citações Cumulativas", secondary_y=True,
-                  title_font=dict(color="#d62728"))
-fig2.update_layout(
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    hovermode="x unified",
-    height=500
-)
-st.plotly_chart(fig2, use_container_width=True)
-
-st.markdown("---")
-
-# ============================================================
-# GRÁFICOS SECUNDÁRIOS
-# ============================================================
-col_esq, col_dir = st.columns(2)
-
-# 1. Tipos de Documento
-with col_esq:
-    st.subheader("📄 Tipos de Documento")
-    tipos_doc = df_filtered['Document Type'].value_counts()
-    fig_tipo = px.pie(values=tipos_doc.values, names=tipos_doc.index, hole=0.4)
-    fig_tipo.update_traces(textposition='inside', textinfo='percent+label')
-    st.plotly_chart(fig_tipo, use_container_width=True)
-
-# 2. Acesso Aberto vs Fechado
-with col_dir:
-    st.subheader("🔓 Status de Acesso Aberto")
-    oa_counts = df_filtered['OA_Status'].value_counts()
-    fig_oa = px.pie(values=oa_counts.values, names=oa_counts.index, hole=0.4,
-                    color_discrete_map={'Open Access': '#2ca02c', 'Fechado': '#d62728'})
-    fig_oa.update_traces(textposition='inside', textinfo='percent+label')
-    st.plotly_chart(fig_oa, use_container_width=True)
-
-# 3. Top 10 Artigos Mais Citados
-st.subheader("🏆 Top 10 Artigos Mais Citados")
-top_citados = df_filtered.nlargest(10, 'Cited by')[['Title', 'Year', 'Cited by', 'Source title']].copy()
-top_citados['Titulo_Curto'] = top_citados['Title'].apply(
-    lambda x: str(x)[:70] + '...' if len(str(x)) > 70 else str(x)
-)
-fig_citados = px.bar(top_citados, x='Cited by', y='Titulo_Curto', orientation='h',
-                     color='Cited by', color_continuous_scale='Viridis',
-                     labels={'Titulo_Curto': 'Artigo', 'Cited by': 'Citações'},
-                     hover_data=['Year', 'Source title', 'Title'])
-fig_citados.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
-st.plotly_chart(fig_citados, use_container_width=True)
-
-col_esq2, col_dir2 = st.columns(2)
-
-# 4. Top 10 Autores
-with col_esq2:
-    st.subheader("👥 Top 10 Autores mais Produtivos")
-    lista_autores = []
-    for autores in df_filtered['Authors'].dropna():
-        lista_autores.extend([a.strip() for a in str(autores).split(';')])
-    contagem_autores = Counter(lista_autores).most_common(10)
-    df_autores = pd.DataFrame(contagem_autores, columns=['Autor', 'Publicações'])
-    fig_autores = px.bar(df_autores, x='Publicações', y='Autor', orientation='h',
-                         color='Publicações', color_continuous_scale='Plasma')
-    fig_autores.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
-    st.plotly_chart(fig_autores, use_container_width=True)
-
-# 5. Top 10 Periódicos
-with col_dir2:
-    st.subheader("📚 Top 10 Periódicos")
-    top_periodicos = df_filtered['Source title'].value_counts().head(10).reset_index()
-    top_periodicos.columns = ['Periódico', 'Publicações']
-    fig_periodicos = px.bar(top_periodicos, x='Publicações', y='Periódico', orientation='h',
-                            color='Publicações', color_continuous_scale='Magma')
-    fig_periodicos.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
-    st.plotly_chart(fig_periodicos, use_container_width=True)
-
-# ============================================================
-# TABELA DE DADOS
-# ============================================================
-st.markdown("---")
-st.subheader("📋 Dados Filtrados")
-st.dataframe(
-    df_filtered[['Title', 'Authors', 'Year', 'Source title', 'Cited by', 'Open Access']],
-    use_container_width=True
-)
-
-# ============================================================
-# RODAPÉ
-# ============================================================
-st.markdown("---")
-st.caption("Dashboard gerado com Streamlit + Plotly | Dados exportados do Scopus")
