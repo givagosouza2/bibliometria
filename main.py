@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from collections import Counter
+import io
 import re
+from collections import Counter
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 
@@ -15,353 +16,214 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Função para processar o GSouza.csv (que tem metadados no topo)
+def parse_gsouza_csv(file):
+    content = file.getvalue().decode("utf-8")
+    lines = content.splitlines()
+    
+    # Extraindo metadados
+    author_name = lines[0].split(',')[1].strip().replace('"', '') if len(lines) > 0 and ',' in lines[0] else "Autor Desconhecido"
+    h_index_str = lines[2].split(',')[1].strip().replace('"', '') if len(lines) > 2 and ',' in lines[2] else ""
+    
+    h_index_match = re.search(r'h-index\s*=\s*(\d+)', h_index_str)
+    h_index = int(h_index_match.group(1)) if h_index_match else 0
+    
+    # Extraindo a tabela de dados (começa na linha 4)
+    data_lines = lines[4:]
+    df = pd.read_csv(io.StringIO("\n".join(data_lines)))
+    
+    return df, author_name, h_index
+
 # Título principal
-st.title("📊 Análise Cientométrica Completa")
-st.markdown("### Autor: Givago Silva Souza")
+st.title("📊 Dashboard de Análise Cientométrica")
+st.markdown("Faça o upload dos arquivos exportados do Scopus na barra lateral para iniciar a análise.")
 st.markdown("---")
 
-# Carregamento dos dados
-@st.cache_data
-def load_data():
+# Sidebar para Upload de Arquivos
+st.sidebar.header("📂 Carregamento de Dados")
+gsouza_file = st.sidebar.file_uploader("1. Carregar GSouza.csv (Perfil do Autor)", type=['csv'])
+scopus_file = st.sidebar.file_uploader("2. Carregar scopus.csv (Exportação Scopus)", type=['csv'])
+
+if gsouza_file and scopus_file:
     try:
-        # Carregar GSouza.csv
-        gsouza_df = pd.read_csv('GSouza.csv', encoding='utf-8')
+        # Carregando e processando os dados
+        gsouza_df, author_name, h_index = parse_gsouza_csv(gsouza_file)
+        scopus_df = pd.read_csv(scopus_file)
         
-        # Carregar scopus.csv
-        scopus_df = pd.read_csv('scopus.csv', encoding='utf-8')
+        st.sidebar.success("✅ Arquivos carregados com sucesso!")
+        st.sidebar.info(f"**Autor:** {author_name}\n**h-index:** {h_index}")
         
-        return gsouza_df, scopus_df
-    except Exception as e:
-        st.error(f"Erro ao carregar os arquivos: {e}")
-        return None, None
-
-gsouza_df, scopus_df = load_data()
-
-if gsouza_df is not None and scopus_df is not None:
-    
-    # Sidebar com filtros
-    st.sidebar.header("🔍 Filtros")
-    
-    # Filtro por ano
-    if 'Year' in scopus_df.columns:
-        years = sorted(scopus_df['Year'].dropna().unique())
-        year_range = st.sidebar.slider(
-            "Período de Publicação",
-            min_value=int(min(years)),
-            max_value=int(max(years)),
-            value=(int(min(years)), int(max(years)))
-        )
-    
-    # Filtro por periódico (top 10)
-    if 'Source title' in scopus_df.columns:
-        top_journals = scopus_df['Source title'].value_counts().head(10).index.tolist()
-        selected_journals = st.sidebar.multiselect(
-            "Periódicos (Top 10)",
-            options=top_journals,
-            default=top_journals
-        )
-    
-    # Aplicar filtros
-    filtered_scopus = scopus_df.copy()
-    if 'Year' in filtered_scopus.columns:
-        filtered_scopus = filtered_scopus[
-            (filtered_scopus['Year'] >= year_range[0]) & 
-            (filtered_scopus['Year'] <= year_range[1])
-        ]
-    
-    if selected_journals and 'Source title' in filtered_scopus.columns:
-        filtered_scopus = filtered_scopus[filtered_scopus['Source title'].isin(selected_journals)]
-    
-    # Métricas principais
-    st.subheader("📈 Métricas Gerais")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        total_publications = len(filtered_scopus)
-        st.metric("Total de Publicações", total_publications)
-    
-    with col2:
-        if 'Cited by' in filtered_scopus.columns:
-            total_citations = filtered_scopus['Cited by'].sum()
+        # --- INÍCIO DO DASHBOARD ---
+        
+        # Métricas principais
+        st.subheader("📈 Métricas Gerais")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        total_publications = len(scopus_df)
+        total_citations = scopus_df['Cited by'].sum() if 'Cited by' in scopus_df.columns else 0
+        avg_citations = scopus_df['Cited by'].mean() if 'Cited by' in scopus_df.columns and total_publications > 0 else 0
+        
+        with col1:
+            st.metric("Total de Publicações", total_publications)
+        with col2:
             st.metric("Total de Citações", int(total_citations))
-    
-    with col3:
-        if 'Cited by' in filtered_scopus.columns and total_publications > 0:
-            avg_citations = filtered_scopus['Cited by'].mean()
+        with col3:
             st.metric("Média de Citações", f"{avg_citations:.2f}")
-    
-    with col4:
-        # h-index (do arquivo GSouza)
-        if 'h-index' in str(gsouza_df.iloc[0, 0]):
-            h_index = 18  # Valor mencionado no arquivo
+        with col4:
             st.metric("h-index", h_index)
-    
-    st.markdown("---")
-    
-    # Tabs para diferentes análises
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📅 Evolução Temporal",
-        "📚 Periódicos",
-        "🔑 Palavras-chave",
-        "👥 Coautores",
-        "📄 Publicações"
-    ])
-    
-    with tab1:
-        st.subheader("Evolução das Publicações por Ano")
         
-        if 'Year' in filtered_scopus.columns:
-            publications_by_year = filtered_scopus['Year'].value_counts().sort_index()
-            
-            fig = px.bar(
-                x=publications_by_year.index,
-                y=publications_by_year.values,
-                labels={'x': 'Ano', 'y': 'Número de Publicações'},
-                title='Publicações por Ano'
-            )
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("---")
         
-        # Citações por ano
-        if 'Year' in filtered_scopus.columns and 'Cited by' in filtered_scopus.columns:
-            st.subheader("Citações Acumuladas por Ano")
-            
-            citations_by_year = filtered_scopus.groupby('Year')['Cited by'].sum().sort_index()
-            cumulative_citations = citations_by_year.cumsum()
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=cumulative_citations.index,
-                y=cumulative_citations.values,
-                mode='lines+markers',
-                name='Citações Acumuladas',
-                line=dict(color='red', width=3)
-            ))
-            fig.update_layout(
-                title='Evolução das Citações Acumuladas',
-                xaxis_title='Ano',
-                yaxis_title='Total de Citações'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
-    with tab2:
-        st.subheader("Principais Periódicos")
+        # Tabs para diferentes análises
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📅 Evolução Temporal",
+            "📚 Periódicos",
+            "🔑 Palavras-chave",
+            "👥 Coautores",
+            "📄 Publicações"
+        ])
         
-        if 'Source title' in filtered_scopus.columns:
-            top_journals = filtered_scopus['Source title'].value_counts().head(15)
-            
-            fig = px.bar(
-                x=top_journals.values,
-                y=top_journals.index,
-                orientation='h',
-                labels={'x': 'Número de Publicações', 'y': 'Periódico'},
-                title='Top 15 Periódicos'
-            )
-            fig.update_layout(showlegend=False, height=600)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Tabela detalhada
-            st.subheader("Detalhes dos Periódicos")
-            journal_stats = filtered_scopus.groupby('Source title').agg({
-                'Title': 'count',
-                'Cited by': ['sum', 'mean']
-            }).round(2)
-            journal_stats.columns = ['Publicações', 'Citações Totais', 'Citações Médias']
-            journal_stats = journal_stats.sort_values('Publicações', ascending=False)
-            
-            st.dataframe(journal_stats.head(20), use_container_width=True)
-    
-    with tab3:
-        st.subheader("Análise de Palavras-chave")
-        
-        if 'Author Keywords' in filtered_scopus.columns:
-            # Extrair palavras-chave
-            all_keywords = []
-            for keywords in filtered_scopus['Author Keywords'].dropna():
-                if isinstance(keywords, str):
-                    # Separar por ponto e vírgula
-                    kws = [kw.strip() for kw in keywords.split(';')]
-                    all_keywords.extend(kws)
-            
-            if all_keywords:
-                keyword_counts = Counter(all_keywords)
-                top_keywords = keyword_counts.most_common(20)
+        with tab1:
+            st.subheader("Evolução das Publicações e Citações por Ano")
+            if 'Year' in scopus_df.columns:
+                col_t1_1, col_t1_2 = st.columns(2)
                 
-                # Gráfico de palavras-chave
-                fig = px.bar(
-                    x=[count for word, count in top_keywords],
-                    y=[word for word, count in top_keywords],
-                    orientation='h',
-                    labels={'x': 'Frequência', 'y': 'Palavra-chave'},
-                    title='Top 20 Palavras-chave'
+                with col_t1_1:
+                    pub_by_year = scopus_df['Year'].value_counts().sort_index()
+                    fig_pub = px.bar(x=pub_by_year.index, y=pub_by_year.values, 
+                                     labels={'x': 'Ano', 'y': 'Publicações'},
+                                     title='Número de Publicações por Ano',
+                                     color_discrete_sequence=['#1f77b4'])
+                    fig_pub.update_layout(showlegend=False)
+                    st.plotly_chart(fig_pub, use_container_width=True)
+                
+                with col_t1_2:
+                    cit_by_year = scopus_df.groupby('Year')['Cited by'].sum().sort_index()
+                    fig_cit = go.Figure()
+                    fig_cit.add_trace(go.Scatter(x=cit_by_year.index, y=cit_by_year.values, 
+                                                 mode='lines+markers', name='Citações',
+                                                 line=dict(color='#ff7f0e', width=3)))
+                    fig_cit.update_layout(title='Evolução das Citações por Ano', 
+                                          xaxis_title='Ano', yaxis_title='Total de Citações')
+                    st.plotly_chart(fig_cit, use_container_width=True)
+        
+        with tab2:
+            st.subheader("Principais Periódicos de Publicação")
+            if 'Source title' in scopus_df.columns:
+                top_journals = scopus_df['Source title'].value_counts().head(15)
+                fig_journals = px.bar(x=top_journals.values, y=top_journals.index, 
+                                      orientation='h', 
+                                      labels={'x': 'Número de Publicações', 'y': 'Periódico'},
+                                      title='Top 15 Periódicos',
+                                      color_discrete_sequence=['#2ca02c'])
+                fig_journals.update_layout(showlegend=False, height=600)
+                st.plotly_chart(fig_journals, use_container_width=True)
+                
+                st.markdown("**Detalhes dos Periódicos (Top 10):**")
+                journal_stats = scopus_df.groupby('Source title').agg({
+                    'Title': 'count',
+                    'Cited by': ['sum', 'mean']
+                }).round(2)
+                journal_stats.columns = ['Publicações', 'Citações Totais', 'Citações Médias']
+                journal_stats = journal_stats.sort_values('Publicações', ascending=False).head(10)
+                st.dataframe(journal_stats, use_container_width=True)
+        
+        with tab3:
+            st.subheader("Análise de Palavras-chave")
+            if 'Author Keywords' in scopus_df.columns:
+                all_keywords = []
+                for keywords in scopus_df['Author Keywords'].dropna():
+                    if isinstance(keywords, str):
+                        kws = [kw.strip().lower() for kw in keywords.split(';')]
+                        all_keywords.extend(kws)
+                
+                if all_keywords:
+                    keyword_counts = Counter(all_keywords)
+                    top_keywords = keyword_counts.most_common(20)
+                    
+                    col_t3_1, col_t3_2 = st.columns([1, 1])
+                    
+                    with col_t3_1:
+                        fig_kw = px.bar(x=[count for word, count in top_keywords], 
+                                        y=[word for word, count in top_keywords], 
+                                        orientation='h',
+                                        labels={'x': 'Frequência', 'y': 'Palavra-chave'},
+                                        title='Top 20 Palavras-chave dos Autores',
+                                        color_discrete_sequence=['#d62728'])
+                        fig_kw.update_layout(showlegend=False, height=600)
+                        st.plotly_chart(fig_kw, use_container_width=True)
+                    
+                    with col_t3_2:
+                        st.markdown("**Nuvem de Palavras**")
+                        wordcloud_text = ' '.join(all_keywords)
+                        wordcloud = WordCloud(width=800, height=400, background_color='white', 
+                                              colormap='viridis', max_words=100).generate(wordcloud_text)
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        ax.imshow(wordcloud, interpolation='bilinear')
+                        ax.axis('off')
+                        st.pyplot(fig)
+        
+        with tab4:
+            st.subheader("Rede de Coautores")
+            if 'Authors' in scopus_df.columns:
+                all_authors = []
+                for authors in scopus_df['Authors'].dropna():
+                    if isinstance(authors, str):
+                        author_list = [author.strip() for author in authors.split(';')]
+                        # Filtrando o autor principal para focar na rede de colaboração
+                        author_list = [a for a in author_list if '57560194800' not in a and 'Souza, Givago' not in a and 'da Silva Souza' not in a]
+                        all_authors.extend(author_list)
+                
+                if all_authors:
+                    author_counts = Counter(all_authors)
+                    top_coauthors = author_counts.most_common(20)
+                    
+                    fig_coauth = px.bar(x=[count for author, count in top_coauthors], 
+                                        y=[author for author, count in top_coauthors], 
+                                        orientation='h',
+                                        labels={'x': 'Número de Colaborações', 'y': 'Coautor'},
+                                        title='Top 20 Coautores mais Frequentes',
+                                        color_discrete_sequence=['#9467bd'])
+                    fig_coauth.update_layout(showlegend=False, height=600)
+                    st.plotly_chart(fig_coauth, use_container_width=True)
+                    
+                    st.markdown("**Lista de Colaboradores:**")
+                    coauthor_df = pd.DataFrame(top_coauthors, columns=['Coautor', 'Colaborações'])
+                    st.dataframe(coauthor_df, use_container_width=True, height=300)
+        
+        with tab5:
+            st.subheader("Lista de Publicações")
+            display_columns = ['Title', 'Year', 'Source title', 'Cited by', 'DOI']
+            available_columns = [col for col in display_columns if col in scopus_df.columns]
+            
+            if available_columns:
+                publications_display = scopus_df[available_columns].copy()
+                publications_display = publications_display.sort_values(by=['Year', 'Cited by'], ascending=[False, False])
+                
+                if 'DOI' in publications_display.columns:
+                    publications_display['Link'] = publications_display['DOI'].apply(
+                        lambda x: f"https://doi.org/{x}" if pd.notna(x) else ""
+                    )
+                
+                st.dataframe(publications_display, use_container_width=True, height=500)
+                
+                csv = publications_display.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download da Lista de Publicações (CSV)",
+                    data=csv,
+                    file_name="publicacoes_givago_souza.csv",
+                    mime="text/csv"
                 )
-                fig.update_layout(showlegend=False, height=600)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Word Cloud
-                st.subheader("Nuvem de Palavras")
-                wordcloud_text = ' '.join(all_keywords)
-                
-                wordcloud = WordCloud(
-                    width=800,
-                    height=400,
-                    background_color='white',
-                    colormap='viridis'
-                ).generate(wordcloud_text)
-                
-                fig, ax = plt.subplots(figsize=(10, 5))
-                ax.imshow(wordcloud, interpolation='bilinear')
-                ax.axis('off')
-                st.pyplot(fig)
         
-        # Palavras-chave dos Index Keywords
-        if 'Index Keywords' in filtered_scopus.columns:
-            st.subheader("Termos de Indexação")
-            all_index_keywords = []
-            for keywords in filtered_scopus['Index Keywords'].dropna():
-                if isinstance(keywords, str):
-                    kws = [kw.strip() for kw in keywords.split(';')]
-                    all_index_keywords.extend(kws)
-            
-            if all_index_keywords:
-                index_keyword_counts = Counter(all_index_keywords)
-                top_index_keywords = index_keyword_counts.most_common(15)
-                
-                fig = px.bar(
-                    x=[count for word, count in top_index_keywords],
-                    y=[word for word, count in top_index_keywords],
-                    orientation='h',
-                    labels={'x': 'Frequência', 'y': 'Termo'},
-                    title='Top 15 Termos de Indexação'
-                )
-                fig.update_layout(showlegend=False, height=500)
-                st.plotly_chart(fig, use_container_width=True)
-    
-    with tab4:
-        st.subheader("Análise de Coautores")
-        
-        if 'Authors' in filtered_scopus.columns:
-            # Extrair coautores
-            all_authors = []
-            for authors in filtered_scopus['Authors'].dropna():
-                if isinstance(authors, str):
-                    # Separar por ponto e vírgula
-                    author_list = [author.strip() for author in authors.split(';')]
-                    all_authors.extend(author_list)
-            
-            # Remover o autor principal
-            main_author_variants = ['Souza G.S.', 'Souza Givago', 'da Silva Souza G.', 'Souza G.']
-            all_authors = [a for a in all_authors if not any(variant in a for variant in main_author_variants)]
-            
-            if all_authors:
-                author_counts = Counter(all_authors)
-                top_coauthors = author_counts.most_common(20)
-                
-                fig = px.bar(
-                    x=[count for author, count in top_coauthors],
-                    y=[author for author, count in top_coauthors],
-                    orientation='h',
-                    labels={'x': 'Número de Colaborações', 'y': 'Coautor'},
-                    title='Top 20 Coautores'
-                )
-                fig.update_layout(showlegend=False, height=600)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Tabela de coautores
-                st.subheader("Lista Completa de Coautores")
-                coauthor_df = pd.DataFrame(top_coauthors, columns=['Coautor', 'Colaborações'])
-                st.dataframe(coauthor_df, use_container_width=True)
-        
-        # Análise de afiliações
-        if 'Affiliations' in filtered_scopus.columns:
-            st.subheader("Afiliações Institucionais")
-            
-            all_affiliations = []
-            for affiliations in filtered_scopus['Affiliations'].dropna():
-                if isinstance(affiliations, str):
-                    # Separar por ponto e vírgula
-                    aff_list = [aff.strip() for aff in affiliations.split(';')]
-                    all_affiliations.extend(aff_list)
-            
-            if all_affiliations:
-                affiliation_counts = Counter(all_affiliations)
-                top_affiliations = affiliation_counts.most_common(15)
-                
-                fig = px.bar(
-                    x=[count for aff, count in top_affiliations],
-                    y=[aff for aff, count in top_affiliations],
-                    orientation='h',
-                    labels={'x': 'Número de Publicações', 'y': 'Afiliação'},
-                    title='Top 15 Afiliações Institucionais'
-                )
-                fig.update_layout(showlegend=False, height=500)
-                st.plotly_chart(fig, use_container_width=True)
-    
-    with tab5:
-        st.subheader("Lista de Publicações")
-        
-        # Selecionar colunas para exibir
-        display_columns = ['Title', 'Year', 'Source title', 'Cited by', 'DOI']
-        available_columns = [col for col in display_columns if col in filtered_scopus.columns]
-        
-        if available_columns:
-            publications_display = filtered_scopus[available_columns].copy()
-            
-            # Ordenar por ano (mais recente primeiro) e citações
-            if 'Year' in publications_display.columns:
-                publications_display = publications_display.sort_values(
-                    by=['Year', 'Cited by'] if 'Cited by' in publications_display.columns else ['Year'],
-                    ascending=[False, False] if 'Cited by' in publications_display.columns else [False]
-                )
-            
-            # Adicionar link para DOI
-            if 'DOI' in publications_display.columns:
-                publications_display['Link'] = publications_display['DOI'].apply(
-                    lambda x: f"https://doi.org/{x}" if pd.notna(x) else ""
-                )
-            
-            st.dataframe(
-                publications_display,
-                use_container_width=True,
-                height=600
-            )
-            
-            # Download da lista
-            csv = publications_display.to_csv(index=False)
-            st.download_button(
-                label="📥 Download da Lista de Publicações (CSV)",
-                data=csv,
-                file_name="publicacoes_givago_souza.csv",
-                mime="text/csv"
-            )
-    
-    # Resumo final
-    st.markdown("---")
-    st.subheader("📋 Resumo da Análise")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown(f"""
-        **Principais Indicadores:**
-        - Total de publicações: **{total_publications}**
-        - Total de citações: **{int(total_citations)}**
-        - Média de citações por artigo: **{avg_citations:.2f}**
-        - h-index: **18**
-        """)
-    
-    with col2:
-        if 'Source title' in filtered_scopus.columns:
-            most_productive_journal = filtered_scopus['Source title'].value_counts().index[0]
-            st.markdown(f"""
-            **Destaques:**
-            - Periódico mais produtivo: **{most_productive_journal}**
-            - Ano com mais publicações: **{publications_by_year.idxmax() if 'Year' in filtered_scopus.columns else 'N/A'}** ({publications_by_year.max() if 'Year' in filtered_scopus.columns else 0} artigos)
-            """)
-    
-    st.markdown("---")
-    st.markdown("*Análise gerada automaticamente a partir dos dados do Scopus e GSouza.csv*")
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao processar os arquivos: {e}")
+        st.info("Certifique-se de que os arquivos CSV estão no formato padrão de exportação do Scopus.")
 
 else:
-    st.error("Não foi possível carregar os dados. Verifique se os arquivos estão no formato correto.")
+    st.info("👈 Por favor, faça o upload de **ambos** os arquivos CSV na barra lateral para gerar o dashboard.")
+    
+    st.markdown("""
+    ### 📌 Como exportar os dados do Scopus:
+    1. **GSouza.csv**: Vá no perfil do autor no Scopus -> Aba "Publication Years" ou "Co-authors" -> Exportar para CSV.
+    2. **scopus.csv**: Vá na busca de documentos do autor -> Selecione todos -> Exportar -> CSV (selecione todas as informações, incluindo Citações, Palavras-chave e Afilições).
+    """)
